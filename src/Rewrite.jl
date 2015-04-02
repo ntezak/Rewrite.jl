@@ -1,5 +1,8 @@
 module Rewrite
 
+using DataStructures
+
+
 export xsub, xmatch, XMatch, rewrite, flatten, distribute_over, distribute_over2
 
 import Base: (==)
@@ -21,11 +24,36 @@ function xsub(e, subs::Dict)
   get(subs, e, e)
 end
 
+type Wildcard
+  symbol::Symbol
+#   minlength::Int64
+#   maxlength::Int64
+#   Wildcard(s) = new(symbol(s), 1, 1)
+#   Wildcard(s,j,k) = new(symbol(s), int(j), int(k))
+end
+
+
+function matchrange(w::Wildcard)
+  Int64[w.minlength, w.maxlength]
+end
+
+function matchrange(v::Vector)
+  rng = zeros(Int, 2)
+  for vj=v
+    rng += matchrange(vj)
+  end
+  rng
+end
+
+function matchrange(x)
+  Int64[1, 1]
+end
+
 type XMatch
   success::Bool
   subs::Dict{Symbol,Any}
   path::Vector{Int64}
-  XMatch(success, subs, path) = new(success, subs,path)
+  XMatch(success, subs, path) = new(success, subs, path)
   XMatch() = new(false, Dict{Symbol,Any}(),Int64[])
   XMatch(success::Bool) = new(success, Dict{Symbol,Any}(),Int64[])
   XMatch(success::Bool, path::Vector{Int64}) = new(success, Dict{Symbol,Any}(), path)
@@ -55,49 +83,26 @@ function xmatch(p::Expr, e::Expr)
   end
 end
 
-# function xmatch_partial(p::Expr, e::Expr)
-#   mh = xmatch(p.head, e.head)
-#   if !mh.success
-#     return mh
-#   end
-#   p = xsub(p, mh.subs)
-#   mh = xmatch(p.args[1], e.args[1])
-#   if !mh.success
-#     return mh
-#   end
-#   p = xsub(p, mh.subs)
-
-#   le = length(e.args)-1
-#   lp = length(p.args)-1
-#   if le < lp
-#     return XMatch()
-#   end
-#   pargs = p.args[2:end]
-#   for k=2:(2+lp-le)
-#     ma = xmatch_args(pargs, sub(e.args, k:k+lp-1))
-#     if ma.success
-#       merge!(ma.subs, mh.subs)
-#       push!(ma.path, k)
-#       return ma
-#     end
-#   end
-#   return XMatch()
-# end
-
-
 function xmatch(p::Symbol, e)
   ps = string(p)
   if endswith(ps, "_")
     if length(ps) == 1
       return XMatch(true)
     end
-    return XMatch(true, [p=>e])
+    return XMatch([p=>e])
   end
   return XMatch(p==e)
 end
 
-
-
+# AnyDict = Union(Dict{Any, Any}, OrderedDict{Any, Any})
+# SymbolDict = Union(Dict{Symbol, AnyDict}, OrderedDict{Symbol, AnyDict})
+# type Rules
+#   atomic::AnyDict
+#   ByHead::SymbolDict
+#   CallByHead::SymbolDict
+#   PartialCallByHead::SymbolDict
+#   Rules() = new(OrderedDict{Any,AnyDict}(),OrderedDict{Symbol,AnyDict}(),OrderedDict{Symbol,AnyDict}(),OrderedDict{Symbol,AnyDict}())
+# end
 
 function xmatch_args(pargs::AbstractVector, eargs::AbstractVector)
   lp = length(pargs)
@@ -116,36 +121,105 @@ function xmatch_args(pargs::AbstractVector, eargs::AbstractVector)
   return m
 end
 
+# function xmatch_partial(callhead::Symbol, rules::Rules, eargs::AbstractVector)
+#   prules = rules.PartialCallByHead[callhead]
+#   lhs = keys(prules)
+#   rhs = values(prules)
 
-function rewrite(rules, e, recursive=true)
+# end
+
+
+
+# function rewrite(rules::Union(Dict, OrderedDict), e, recursive=true)
+#   from = keys(rules)
+#   to = values(rules)
+#   success = true
+#   while success
+#     success = false
+#     for (fk,tk) = zip(from, to)
+#       xm = xmatch(fk, e)
+#       if xm.success
+#         if isa(tk, Function)
+#           e = tk(;xm.subs...)
+#         else
+#           e = xsub(tk, xm.subs)
+#         end
+#         success = true
+# #         println(e)
+#       end
+#     end
+#   end
+#   return e
+# end
+
+
+
+
+
+
+function rewrite_top(rules, e)
   from = keys(rules)
   to = values(rules)
   for (fk,tk) = zip(from, to)
     xm = xmatch(fk, e)
     if xm.success
       if isa(tk, Function)
-        return tk(;xm.subs...)
+        return XRewrite(true, tk(;xm.subs...))
+      else
+        return XRewrite(true, xsub(tk, xm.subs))
       end
-      return xsub(tk, xm.subs)
     end
   end
-  return e
+  XRewrite(false, e)
 end
 
-function rewrite(rules, e::Expr, recursive=true)
-  er = invoke(rewrite, (Any, Any, Any), rules, e, recursive)
-  if er != e
-    return er
-  end
-  if recursive
-    rh = rewrite(rules, e.head)
-    rargs = [rewrite(rules, arg, recursive=recursive) for  arg=e.args]
-    re = Expr(rh)
-    re.args = rargs
-    return re
-  end
-  return e
+type XRewrite
+  success::Bool
+  result
 end
+
+function rewrite_step(rules, e, recursive=true)
+  rewrite_top(rules, e)
+end
+
+function rewrite_step(rules, e::Expr, recursive=true)
+  success = false
+  if recursive
+    rh = rewrite_step(rules, e.head)
+    success = rh.success
+    nargs = {}
+    for arg in e.args
+      rarg = rewrite_step(rules, arg, recursive)
+      success = success || rarg.success
+      push!(nargs, rarg.result)
+    end
+    e = Expr(rh.result)
+    e.args = nargs
+  end
+  rt = rewrite_top(rules, e)
+  return XRewrite(rt.success || success, rt.result)
+end
+
+
+function xrewrite(rules, e, recursive=true)
+#   print(e, " [ ")
+  success = true
+  anysuccess = false
+  while success
+    er = rewrite_step(rules, e, recursive)
+    success = er.success
+    anysuccess = anysuccess || success
+    e = er.result
+  end
+#   println(" ] -> ", e)
+  XRewrite(anysuccess, e)
+end
+
+function rewrite(rules, e, recursive=true)
+  xres = xrewrite(rules, e, recursive)
+  xres.result
+end
+
 
 
 
